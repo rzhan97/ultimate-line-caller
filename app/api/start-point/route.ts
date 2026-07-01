@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
       scoreThem,    // K: ScoreThemAfter
       "In Progress",// L: Status
       "",           // M: Notes
-      "",           // N: GameDay (filled externally if needed)
+      String(config.current_game_day || "1"), // N: GameDay
       "",           // O: SetPlay
       "",           // P: SetPlaySuccess
       gameId,       // Q: GameID

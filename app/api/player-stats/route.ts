@@ -13,7 +13,8 @@ export async function GET(req: NextRequest) {
     ]);
 
     const currentGameId = (config.current_game_id || "").trim();
-    const gameIdToUse = filterGameId || currentGameId;
+    // "all" means show everything, empty string falls back to current game
+    const gameIdToUse = filterGameId === "all" ? "" : (filterGameId || currentGameId);
 
     // day2_date separates day 1 / day 2 within a tournament
     const day2DateStr = (config.day2_date || "").trim();

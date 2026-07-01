@@ -12,6 +12,7 @@ type DashboardData = {
   config: Record<string, string>;
   availablePlayers: Player[];
   latestPoints: Array<Record<string, string>>;
+  allPoints: Array<Record<string, string>>;
   currentGame: Game | null;
   games: Game[];
 };
@@ -360,6 +361,7 @@ function GameTab({ data, playerStats, onRefresh, onEndGame }: {
   const [selected, setSelected] = useState<string[]>([]);
   const [lineType, setLineType] = useState(data.config.line_type || "O");
   const [possessionType, setPossessionType] = useState(data.config.possession_type || "Receive");
+  const [gameDay, setGameDay] = useState(data.config.current_game_day || "1");
   const [loading, setLoading] = useState(false);
   const [selectedPlayer, setSelectedPlayer] = useState<PlayerStat | null>(null);
   const [showEndModal, setShowEndModal] = useState(false);
@@ -491,6 +493,11 @@ function GameTab({ data, playerStats, onRefresh, onEndGame }: {
           <select value={possessionType} onChange={(e) => setPossessionType(e.target.value)} style={{ ...inputStyle, width: "auto" }}>
             <option value="Receive">Receive</option>
             <option value="Pull">Pull</option>
+          </select>
+          <select value={gameDay} onChange={(e) => { setGameDay(e.target.value); fetch("/api/set-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: "current_game_day", value: e.target.value }) }); }} style={{ ...inputStyle, width: "auto" }}>
+            <option value="1">Day 1</option>
+            <option value="2">Day 2</option>
+            <option value="3">Day 3</option>
           </select>
         </div>
       </div>
@@ -770,59 +777,83 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
   onOpenPlayer: (s: PlayerStat) => void;
 }) {
   const [selectedGameId, setSelectedGameId] = useState(defaultGameId || "all");
+  const [selectedTournament, setSelectedTournament] = useState<string>("all");
   const [dayFilter, setDayFilter] = useState<"all" | "1" | "2">("all");
   const [view, setView] = useState<"team" | "players" | "setplays" | "points">("team");
-  const [statsCache, setStatsCache] = useState<Record<string, PlayerStat[]>>({});
-  const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    const key = selectedGameId;
-    if (statsCache[key]) return;
-    setLoading(true);
-    const url = key === "all" ? "/api/player-stats" : `/api/player-stats?gameId=${key}`;
-    fetch(url)
-      .then((r) => r.json())
-      .then((data) => {
-        setStatsCache((prev) => ({ ...prev, [key]: Array.isArray(data) ? data : [] }));
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [selectedGameId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Games filtered by selected tournament
+  const filteredGames = useMemo(() => {
+    if (selectedTournament === "all") return allGames;
+    return allGames.filter((g) => (g.Tournament || "No Tournament") === selectedTournament);
+  }, [allGames, selectedTournament]);
 
-  const playerStats = statsCache[selectedGameId] || [];
-
+  // Points filtered by tournament + game + day
   const gamePoints = useMemo(() => {
-    const pts = selectedGameId === "all"
-      ? allPoints
-      : allPoints.filter((p) => (p.GameID || "") === selectedGameId);
-    if (dayFilter === "all") return pts;
-    return pts.filter((p) => {
-      const gameDay = (p.GameDay || "").trim();
-      return gameDay ? gameDay === dayFilter : dayFilter === "1";
-    });
-  }, [allPoints, selectedGameId, dayFilter]);
+    let pts = allPoints.filter((p) => (p.Status || "").trim().toLowerCase() === "completed");
+    if (selectedTournament !== "all" && selectedGameId === "all") {
+      const gameIds = new Set(filteredGames.map((g) => g.GameID));
+      pts = pts.filter((p) => gameIds.has(p.GameID || ""));
+    } else if (selectedGameId !== "all") {
+      pts = pts.filter((p) => (p.GameID || "") === selectedGameId);
+    }
+    if (dayFilter !== "all") {
+      pts = pts.filter((p) => {
+        const gd = (p.GameDay || "").trim();
+        return gd ? gd === dayFilter : dayFilter === "1";
+      });
+    }
+    return pts;
+  }, [allPoints, selectedGameId, selectedTournament, filteredGames, dayFilter]);
 
+  // Compute player stats client-side from filtered points
   const filteredStats = useMemo<PlayerStat[]>(() => {
-    if (dayFilter === "all") return playerStats;
-    return playerStats.map((p) => {
-      const d = dayFilter === "1" ? p.day1 : p.day2;
-      const scorable = d.holds + d.conceded;
-      const holdRate   = scorable > 0  ? Math.round((d.holds  / scorable)  * 100) : 0;
-      const breakRate  = d.dPoints > 0 ? Math.round((d.breaks / d.dPoints) * 100) : 0;
-      const oHoldRate  = d.oPoints > 0 ? Math.round((d.holds  / d.oPoints) * 100) : 0;
-      const dBreakRate = d.dPoints > 0 ? Math.round((d.breaks / d.dPoints) * 100) : 0;
-      const avgDur     = d.totalPoints > 0 ? Math.round(d.totalSeconds / d.totalPoints) : 0;
+    const stats: Record<string, { name: string; pts: number; sec: number; oPts: number; dPts: number; holds: number; breaks: number; conceded: number; setPlayCount: number; setPlaySuccess: number; d1: { pts: number; sec: number; oPts: number; dPts: number; holds: number; breaks: number; conceded: number }; d2: { pts: number; sec: number; oPts: number; dPts: number; holds: number; breaks: number; conceded: number }; recentPoints: RecentPoint[] }> = {};
+    for (const pt of gamePoints) {
+      const dur = Number(pt.DurationSec || 0);
+      const lt = (pt.LineType || "").trim().toUpperCase();
+      const rawR = (pt.Result || "").trim().toLowerCase();
+      const res = rawR.startsWith("hold") ? "hold" : rawR.startsWith("break") ? "break" : rawR.startsWith("conced") || rawR.startsWith("lost") || rawR.startsWith("loss") ? "conceded" : rawR;
+      const gd = (pt.GameDay || "").trim();
+      const day: 1 | 2 = gd === "2" ? 2 : 1;
+      const sp = (pt.SetPlay || "").trim();
+      const spS = (pt.SetPlaySuccess || "").trim().toLowerCase();
+      const names = (pt.PlayersCSV || "").split(",").map((s) => s.trim()).filter(Boolean);
+      for (const name of names) {
+        if (!stats[name]) stats[name] = { name, pts: 0, sec: 0, oPts: 0, dPts: 0, holds: 0, breaks: 0, conceded: 0, setPlayCount: 0, setPlaySuccess: 0, d1: { pts: 0, sec: 0, oPts: 0, dPts: 0, holds: 0, breaks: 0, conceded: 0 }, d2: { pts: 0, sec: 0, oPts: 0, dPts: 0, holds: 0, breaks: 0, conceded: 0 }, recentPoints: [] };
+        const s = stats[name];
+        s.pts += 1; s.sec += dur;
+        if (lt === "O") s.oPts += 1;
+        if (lt === "D") s.dPts += 1;
+        if (res === "hold") s.holds += 1;
+        if (res === "break") s.breaks += 1;
+        if (res === "conceded") s.conceded += 1;
+        if (sp) { s.setPlayCount += 1; if (spS === "yes") s.setPlaySuccess += 1; }
+        const dk = day === 2 ? s.d2 : s.d1;
+        dk.pts += 1; dk.sec += dur;
+        if (lt === "O") dk.oPts += 1; if (lt === "D") dk.dPts += 1;
+        if (res === "hold") dk.holds += 1; if (res === "break") dk.breaks += 1; if (res === "conceded") dk.conceded += 1;
+        if (s.recentPoints.length < 15) s.recentPoints.push({ pointNumber: pt.PointNumber || "", lineType: lt, possessionType: pt.PossessionType || "", result: pt.Result || "", durationSec: dur, startTime: pt.StartTime || "", day, setPlay: sp, setPlaySuccess: spS });
+      }
+    }
+    return Object.values(stats).map((p) => {
+      const scoredPts = p.holds + p.breaks;
+      const holdRate = p.pts > 0 ? Math.round((scoredPts / p.pts) * 100) : 0;
+      const oHoldRate = p.oPts > 0 ? Math.round((p.holds / p.oPts) * 100) : 0;
+      const dBreakRate = p.dPts > 0 ? Math.round((p.breaks / p.dPts) * 100) : 0;
+      const breakRate = dBreakRate;
+      const avgDur = p.pts > 0 ? Math.round(p.sec / p.pts) : 0;
+      const spRate = p.setPlayCount > 0 ? Math.round((p.setPlaySuccess / p.setPlayCount) * 100) : 0;
+      const mkDay = (d: typeof p.d1): DayStat => ({ totalPoints: d.pts, totalSeconds: d.sec, totalMinutes: Number((d.sec / 60).toFixed(1)), oPoints: d.oPts, dPoints: d.dPts, holds: d.holds, breaks: d.breaks, conceded: d.conceded });
       return {
-        ...p,
-        totalPoints: d.totalPoints, totalSeconds: d.totalSeconds,
-        totalMinutes: Number((d.totalSeconds / 60).toFixed(1)),
-        oPoints: d.oPoints, dPoints: d.dPoints,
-        holds: d.holds, breaks: d.breaks, conceded: d.conceded,
+        name: p.name, role: "", notes: "",
+        totalPoints: p.pts, totalSeconds: p.sec, totalMinutes: Number((p.sec / 60).toFixed(1)),
+        oPoints: p.oPts, dPoints: p.dPts, holds: p.holds, breaks: p.breaks, conceded: p.conceded,
         holdRate, breakRate, oHoldRate, dBreakRate, avgPointDuration: avgDur,
-        recentPoints: p.recentPoints.filter((rp) => String(rp.day) === dayFilter),
+        setPlayCount: p.setPlayCount, setPlaySuccess: p.setPlaySuccess, setPlaySuccessRate: spRate,
+        day1: mkDay(p.d1), day2: mkDay(p.d2), recentPoints: p.recentPoints,
       };
-    });
-  }, [playerStats, dayFilter]);
+    }).sort((a, b) => b.totalPoints !== a.totalPoints ? b.totalPoints - a.totalPoints : a.name.localeCompare(b.name));
+  }, [gamePoints]);
 
   const team = useMemo(() => {
     const sum = { pts: 0, holds: 0, breaks: 0, conceded: 0, oPts: 0, dPts: 0 };
@@ -861,37 +892,66 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
 
   return (
     <div>
-      {/* Game selector */}
+      {/* Game selector — grouped by tournament */}
       <div style={{ ...card, padding: "12px 14px", marginBottom: 10 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", marginBottom: 8, letterSpacing: "0.05em" }}>GAME</div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          <button onClick={() => { setSelectedGameId("all"); setStatsCache({}); }} style={{
-            padding: "6px 12px", borderRadius: 8, border: "1.5px solid",
-            borderColor: selectedGameId === "all" ? "#111827" : "#e5e7eb",
-            background: selectedGameId === "all" ? "#111827" : "#f9fafb",
-            color: selectedGameId === "all" ? "#fff" : "#374151",
-            fontWeight: 700, fontSize: 12, cursor: "pointer",
-          }}>All Games</button>
-          {allGames.filter((g) => g.GameID).map((g) => {
-            const active = selectedGameId === g.GameID;
-            const isCompleted = (g.Status || "").toLowerCase() === "completed";
-            return (
-              <button key={g.GameID} onClick={() => { setSelectedGameId(g.GameID); setStatsCache({}); }} style={{
-                padding: "6px 12px", borderRadius: 8, border: "1.5px solid",
-                borderColor: active ? "#2563eb" : "#e5e7eb",
-                background: active ? "#2563eb" : "#f9fafb",
-                color: active ? "#fff" : "#374151",
-                fontWeight: 700, fontSize: 12, cursor: "pointer",
-                opacity: isCompleted ? 0.8 : 1,
-              }}>
-                {g.Name}{g.Opponent ? ` vs ${g.Opponent}` : ""}{isCompleted ? ` · ${g.ScoreUs}–${g.ScoreThem}` : ""}
-              </button>
-            );
-          })}
-        </div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", marginBottom: 8, letterSpacing: "0.05em" }}>FILTER</div>
+
+        {/* Tournament pills */}
+        {(() => {
+          const tournaments = [...new Set(allGames.map((g) => g.Tournament || "No Tournament"))];
+          return (
+            <>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
+                <button onClick={() => { setSelectedGameId("all"); setStatsCache({}); setSelectedTournament("all"); }} style={{
+                  padding: "5px 11px", borderRadius: 7, border: "1.5px solid",
+                  borderColor: selectedTournament === "all" ? "#111827" : "#e5e7eb",
+                  background: selectedTournament === "all" ? "#111827" : "#f9fafb",
+                  color: selectedTournament === "all" ? "#fff" : "#374151",
+                  fontWeight: 700, fontSize: 11, cursor: "pointer",
+                }}>All</button>
+                {tournaments.map((t) => (
+                  <button key={t} onClick={() => { setSelectedTournament(t); setSelectedGameId("all"); setStatsCache({}); }} style={{
+                    padding: "5px 11px", borderRadius: 7, border: "1.5px solid",
+                    borderColor: selectedTournament === t ? "#7c3aed" : "#e5e7eb",
+                    background: selectedTournament === t ? "#ede9fe" : "#f9fafb",
+                    color: selectedTournament === t ? "#5b21b6" : "#374151",
+                    fontWeight: 700, fontSize: 11, cursor: "pointer",
+                  }}>{t}</button>
+                ))}
+              </div>
+
+              {/* Game pills within selected tournament */}
+              {selectedTournament !== "all" && (
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
+                  <button onClick={() => { setSelectedGameId("all"); setStatsCache({}); }} style={{
+                    padding: "4px 10px", borderRadius: 6, border: "1.5px solid",
+                    borderColor: selectedGameId === "all" ? "#2563eb" : "#e5e7eb",
+                    background: selectedGameId === "all" ? "#2563eb" : "#f9fafb",
+                    color: selectedGameId === "all" ? "#fff" : "#374151",
+                    fontWeight: 600, fontSize: 11, cursor: "pointer",
+                  }}>All in {selectedTournament}</button>
+                  {filteredGames.map((g) => {
+                    const active = selectedGameId === g.GameID;
+                    const done = (g.Status || "").toLowerCase() === "completed";
+                    return (
+                      <button key={g.GameID} onClick={() => { setSelectedGameId(g.GameID); setStatsCache({}); }} style={{
+                        padding: "4px 10px", borderRadius: 6, border: "1.5px solid",
+                        borderColor: active ? "#2563eb" : "#e5e7eb",
+                        background: active ? "#2563eb" : "#f9fafb",
+                        color: active ? "#fff" : "#374151",
+                        fontWeight: 600, fontSize: 11, cursor: "pointer",
+                        opacity: done ? 0.8 : 1,
+                      }}>{g.Name}{g.Opponent ? ` v ${g.Opponent}` : ""}{done ? ` ${Number(g.ScoreUs) > Number(g.ScoreThem) ? "W" : "L"} ${g.ScoreUs}-${g.ScoreThem}` : ""}</button>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          );
+        })()}
 
         {/* Day filter */}
-        <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+        <div style={{ display: "flex", gap: 6 }}>
           {(["all", "1", "2"] as const).map((d) => (
             <button key={d} onClick={() => setDayFilter(d)} style={{
               padding: "4px 12px", borderRadius: 6, border: "1.5px solid",
@@ -916,9 +976,7 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
         ))}
       </div>
 
-      {loading && <div style={{ textAlign: "center", color: "#6b7280", padding: 24 }}>Loading stats…</div>}
-
-      {!loading && view === "team" && (
+      {view === "team" && (
         <div>
           <div style={statGrid}>
             <StatBox label="Total Pts" value={team.pts} />
@@ -928,10 +986,10 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
             <StatBox label="Breaks"    value={team.breaks}   color="#2563eb" />
             <StatBox label="Conceded"  value={team.conceded} color="#dc2626" />
           </div>
-          {dayFilter === "all" && playerStats.length > 0 && (() => {
+          {dayFilter === "all" && filteredStats.length > 0 && (() => {
             const sumDay = (key: "day1" | "day2") => {
               const s = { pts: 0, holds: 0, breaks: 0, conceded: 0, dPts: 0 };
-              for (const p of playerStats) {
+              for (const p of filteredStats) {
                 s.pts += p[key].totalPoints; s.holds += p[key].holds;
                 s.breaks += p[key].breaks; s.conceded += p[key].conceded; s.dPts += p[key].dPoints;
               }
@@ -959,11 +1017,11 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
         </div>
       )}
 
-      {!loading && view === "players" && (
+      {view === "players" && (
         <SortableStatsTable playerStats={filteredStats} onOpenPlayer={onOpenPlayer} />
       )}
 
-      {!loading && view === "setplays" && (
+      {view === "setplays" && (
         setPlayStats.length === 0 ? (
           <div style={{ color: "#6b7280", textAlign: "center", padding: 32, fontSize: 14 }}>No set plays recorded yet.</div>
         ) : (
@@ -977,7 +1035,7 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
         )
       )}
 
-      {!loading && view === "points" && (
+      {view === "points" && (
         gamePoints.length === 0 ? (
           <div style={{ ...card, color: "#6b7280", textAlign: "center", padding: 32 }}>No points for this selection.</div>
         ) : (
@@ -1000,6 +1058,85 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
             );
           })
         )
+      )}
+    </div>
+  );
+}
+
+// ─── Tournament Group (for Games tab) ─────────────────────────────────────────
+
+function TournamentGroup({ name, games, isActive, wins, losses, currentGameId, scoreUs, scoreThem, pointNumber, onPlay, onSwitch, loading }: {
+  name: string; games: Game[]; isActive: boolean; wins: number; losses: number;
+  currentGameId: string; scoreUs: string; scoreThem: string; pointNumber: string;
+  onPlay: (id: string) => void; onSwitch: (id: string) => void; loading: boolean;
+}) {
+  const [open, setOpen] = useState(isActive);
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <button onClick={() => setOpen((v) => !v)} style={{
+        display: "flex", alignItems: "center", width: "100%", gap: 8,
+        padding: "10px 14px", borderRadius: 10, border: "1.5px solid",
+        borderColor: isActive ? "#111827" : "#e5e7eb",
+        background: isActive ? "#f8fafc" : "#fff",
+        cursor: "pointer", textAlign: "left",
+      }}>
+        <span style={{ fontSize: 14, fontWeight: 800, color: "#111827", flex: 1 }}>
+          {isActive ? "🏆 " : "📦 "}{name}
+        </span>
+        <span style={{ fontSize: 11, color: "#6b7280" }}>
+          {games.length} game{games.length !== 1 ? "s" : ""}
+          {(wins > 0 || losses > 0) && ` · ${wins}W ${losses}L`}
+        </span>
+        {isActive && <span style={{ fontSize: 9, fontWeight: 700, color: "#16a34a", background: "#dcfce7", padding: "2px 7px", borderRadius: 999 }}>ACTIVE</span>}
+        <span style={{ fontSize: 14, color: "#9ca3af" }}>{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div style={{ marginTop: 6, paddingLeft: 4 }}>
+          {[...games].reverse().map((g) => {
+            const isGameActive = g.GameID === currentGameId;
+            const isCompleted = (g.Status || "").toLowerCase() === "completed";
+            const su = Number(g.ScoreUs || 0);
+            const st = Number(g.ScoreThem || 0);
+            const outcome = isCompleted ? (su > st ? "🏆" : su < st ? "💔" : "🤝") : null;
+            return (
+              <div key={g.GameID} style={{
+                ...card, padding: "12px 14px", marginBottom: 6,
+                border: isGameActive ? "2px solid #111827" : "1px solid #e5e7eb",
+                background: isGameActive ? "#f0fdf4" : "#fff",
+                opacity: isCompleted && !isGameActive ? 0.8 : 1,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, color: "#111827", fontSize: 14, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                      {isGameActive && <span style={{ fontSize: 9, fontWeight: 700, color: "#16a34a", background: "#dcfce7", padding: "2px 6px", borderRadius: 999 }}>● LIVE</span>}
+                      {g.Name}
+                    </div>
+                    <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
+                      {g.Opponent && `vs ${g.Opponent} · `}{g.Date}
+                    </div>
+                    {isGameActive && (
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#111827", marginTop: 4 }}>
+                        {scoreUs} – {scoreThem}
+                        <span style={{ fontWeight: 400, color: "#6b7280", marginLeft: 6, fontSize: 11 }}>Pt #{pointNumber}</span>
+                      </div>
+                    )}
+                    {isCompleted && (
+                      <div style={{ fontSize: 13, fontWeight: 700, marginTop: 4 }}>
+                        <span style={{ color: su > st ? "#15803d" : su < st ? "#b91c1c" : "#374151" }}>{outcome}</span>
+                        <span style={{ fontWeight: 400, color: "#6b7280", marginLeft: 6 }}>{su}–{st}</span>
+                      </div>
+                    )}
+                  </div>
+                  {isGameActive ? (
+                    <button onClick={() => onPlay(g.GameID)} style={{ ...primaryBtn, fontSize: 12, padding: "6px 12px" }}>🏃 Play</button>
+                  ) : !isCompleted ? (
+                    <button onClick={() => onSwitch(g.GameID)} disabled={loading} style={{ ...ghostBtn, fontSize: 11, padding: "5px 10px" }}>Switch</button>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -1029,7 +1166,7 @@ function GamesTab({ data, onRefresh, onSwitchToGame }: {
       if (!res.ok) throw new Error(json.error);
       setName(""); setOpponent("");
       await onRefresh();
-      onSwitchToGame(json.gameId); // auto-navigate to Line tab for new game
+      // Game created — stay on Games tab so user can see it, then click Play
     } catch (err) { alert(err instanceof Error ? err.message : "Error"); }
     finally { setLoading(false); }
   }
@@ -1076,71 +1213,110 @@ function GamesTab({ data, onRefresh, onSwitchToGame }: {
         </button>
       </div>
 
-      {/* Game list */}
-      <div style={{ fontWeight: 700, fontSize: 12, color: "#9ca3af", marginBottom: 8, letterSpacing: "0.05em" }}>ALL GAMES</div>
+      {/* Archive tournament */}
+      {data.games.length > 0 && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <button
+            onClick={async () => {
+              if (!confirm("Archive all games? This marks all current games as completed and clears the active game. Your data is NOT deleted — it all stays in Stats.")) return;
+              setLoading(true);
+              try {
+                const res = await fetch("/api/archive-tournament", { method: "POST" });
+                const json = await res.json();
+                if (!res.ok) throw new Error(json.error);
+                alert(`✅ Archived ${json.archived} game(s). Ready for a new tournament!`);
+                await onRefresh();
+              } catch (err) { alert(err instanceof Error ? err.message : "Error"); }
+              finally { setLoading(false); }
+            }}
+            disabled={loading}
+            style={{ ...ghostBtn, color: "#d97706", background: "#fef3c7", border: "1px solid #fde68a", fontSize: 12, padding: "8px 14px" }}
+          >
+            📦 Archive All &amp; Start New Tournament
+          </button>
+        </div>
+      )}
+
+      {/* Game list — grouped by tournament */}
       {data.games.length === 0 ? (
         <div style={{ color: "#9ca3af", textAlign: "center", padding: 32, fontSize: 14 }}>
           No games yet — create one above to get started.
         </div>
-      ) : (
-        [...data.games].reverse().map((g) => {
-          const isActive = g.GameID === data.config.current_game_id;
-          const isCompleted = (g.Status || "").toLowerCase() === "completed";
-          const scoreUs    = Number(g.ScoreUs || 0);
-          const scoreThem  = Number(g.ScoreThem || 0);
-          const outcome = isCompleted
-            ? (scoreUs > scoreThem ? "🏆 Win" : scoreUs < scoreThem ? "💔 Loss" : "🤝 Draw")
-            : null;
+      ) : (() => {
+        // Group by tournament
+        const grouped: Record<string, typeof data.games> = {};
+        for (const g of data.games) {
+          const t = g.Tournament || "No Tournament";
+          if (!grouped[t]) grouped[t] = [];
+          grouped[t].push(g);
+        }
+        // Active tournaments (have at least one non-completed game) first
+        const tournamentNames = Object.keys(grouped).sort((a, b) => {
+          const aActive = grouped[a].some((g) => (g.Status || "").toLowerCase() !== "completed");
+          const bActive = grouped[b].some((g) => (g.Status || "").toLowerCase() !== "completed");
+          if (aActive && !bActive) return -1;
+          if (!aActive && bActive) return 1;
+          return 0;
+        });
+
+        return tournamentNames.map((tName) => {
+          const games = grouped[tName];
+          const isActiveTournament = games.some((g) => (g.Status || "").toLowerCase() !== "completed" || g.GameID === data.config.current_game_id);
+          const wins = games.filter((g) => Number(g.ScoreUs || 0) > Number(g.ScoreThem || 0) && (g.Status || "").toLowerCase() === "completed").length;
+          const losses = games.filter((g) => Number(g.ScoreUs || 0) < Number(g.ScoreThem || 0) && (g.Status || "").toLowerCase() === "completed").length;
+
           return (
-            <div key={g.GameID} style={{
-              ...card, padding: "14px 16px", marginBottom: 8,
-              border: isActive ? "2px solid #111827" : "1px solid #e5e7eb",
-              background: isActive ? "#f8fafc" : "#fff",
-              opacity: isCompleted && !isActive ? 0.85 : 1,
-            }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 700, color: "#111827", fontSize: 15, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    {isActive && <span style={{ fontSize: 10, fontWeight: 700, color: "#16a34a", background: "#dcfce7", padding: "2px 7px", borderRadius: 999 }}>● ACTIVE</span>}
-                    {isCompleted && <span style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", background: "#f3f4f6", padding: "2px 7px", borderRadius: 999 }}>✓ Done</span>}
-                    {g.Name}
-                  </div>
-                  <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
-                    {g.Opponent && `vs ${g.Opponent}  ·  `}{g.Date}{g.Tournament ? `  ·  ${g.Tournament}` : ""}
-                  </div>
-                  {isActive && (
-                    <div style={{ fontSize: 13, fontWeight: 700, color: "#111827", marginTop: 6 }}>
-                      {data.config.score_us || 0} – {data.config.score_them || 0}
-                      <span style={{ fontWeight: 400, color: "#6b7280", marginLeft: 8 }}>
-                        Point #{data.config.current_point_number || 1}
-                      </span>
-                    </div>
-                  )}
-                  {isCompleted && (
-                    <div style={{ fontSize: 14, fontWeight: 800, marginTop: 6 }}>
-                      <span style={{ color: scoreUs > scoreThem ? "#15803d" : scoreUs < scoreThem ? "#b91c1c" : "#374151" }}>
-                        {outcome}
-                      </span>
-                      <span style={{ fontWeight: 400, color: "#6b7280", marginLeft: 8 }}>
-                        {scoreUs} – {scoreThem}
-                      </span>
-                    </div>
-                  )}
-                </div>
-                {isActive ? (
-                  <button onClick={() => onSwitchToGame(g.GameID)} style={{ ...primaryBtn, fontSize: 13, padding: "8px 14px" }}>
-                    🏃 Play →
-                  </button>
-                ) : !isCompleted ? (
-                  <button onClick={() => switchGame(g.GameID)} disabled={loading} style={{ ...ghostBtn, fontSize: 12, padding: "6px 12px" }}>
-                    Switch →
-                  </button>
-                ) : null}
-              </div>
-            </div>
+            <TournamentGroup
+              key={tName}
+              name={tName}
+              games={games}
+              isActive={isActiveTournament}
+              wins={wins}
+              losses={losses}
+              currentGameId={data.config.current_game_id || ""}
+              scoreUs={data.config.score_us || "0"}
+              scoreThem={data.config.score_them || "0"}
+              pointNumber={data.config.current_point_number || "1"}
+              onPlay={onSwitchToGame}
+              onSwitch={switchGame}
+              loading={loading}
+            />
           );
-        })
-      )}
+        });
+      })()}
+
+      {/* Wipe all data */}
+      <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px solid #fee2e2" }}>
+        <button
+          onClick={async () => {
+            if (!confirm("⚠️ WARNING: This will permanently delete ALL points, ALL games, and reset everything. This cannot be undone.\n\nAre you sure?")) return;
+            if (!confirm("🚨 FINAL WARNING: All tournament data, stats, and game history will be gone forever.\n\nType YES in the next prompt to confirm.")) return;
+            const typed = window.prompt("Type YES to confirm full data wipe:");
+            if (typed !== "YES") { alert("Cancelled."); return; }
+            setLoading(true);
+            try {
+              const res = await fetch("/api/wipe-all", { method: "POST" });
+              const json = await res.json();
+              if (!res.ok) throw new Error(json.error);
+              alert("🗑 All data wiped. Starting fresh.");
+              await onRefresh();
+            } catch (err) { alert(err instanceof Error ? err.message : "Error"); }
+            finally { setLoading(false); }
+          }}
+          disabled={loading}
+          style={{
+            width: "100%", padding: "12px", borderRadius: 10,
+            border: "2px solid #fca5a5", background: "#fef2f2",
+            color: "#991b1b", fontWeight: 700, fontSize: 13,
+            cursor: "pointer",
+          }}
+        >
+          🗑 Wipe All Data &amp; Start Fresh
+        </button>
+        <div style={{ fontSize: 11, color: "#9ca3af", textAlign: "center", marginTop: 6 }}>
+          Permanently deletes all games, points, and stats. Cannot be undone.
+        </div>
+      </div>
     </div>
   );
 }
@@ -1208,7 +1384,7 @@ export default function HomePage() {
         />
       )}
       {tab === "game"   && <GameTab data={data} playerStats={playerStats} onRefresh={load} onEndGame={() => setTab("games")} />}
-      {tab === "stats"  && <StatsTab allGames={data.games} allPoints={data.latestPoints} defaultGameId={data.config.current_game_id || ""} onOpenPlayer={setOpenPlayer} />}
+      {tab === "stats"  && <StatsTab allGames={data.games} allPoints={data.allPoints} defaultGameId={data.config.current_game_id || ""} onOpenPlayer={setOpenPlayer} />}
     </main>
   );
 }

@@ -31,7 +31,7 @@ export async function GET() {
 
     // Map Games sheet columns to the shape the UI expects
     const mappedGames = games
-      .filter((g) => g.GameID)
+      .filter((g) => g.GameID && g.GameID.startsWith("GAME_"))
       .map((g) => ({
         GameID:       g.GameID,
         Name:         g.GameName || g.GameID,   // sheet uses GameName
@@ -47,7 +47,7 @@ export async function GET() {
 
     const currentGame = mappedGames.find((g) => g.GameID === currentGameId) || null;
 
-    return NextResponse.json({ config, availablePlayers, latestPoints, currentGame, games: mappedGames });
+    return NextResponse.json({ config, availablePlayers, latestPoints, allPoints, currentGame, games: mappedGames });
   } catch (err) {
     console.error("DASHBOARD ERROR:", err);
     return NextResponse.json({ error: err instanceof Error ? err.message : "Unknown error" }, { status: 500 });
