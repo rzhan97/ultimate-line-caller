@@ -3,49 +3,40 @@ import { getValues, updateValues } from "@/lib/sheets";
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const body        = await req.json();
     const { name, notes } = body;
 
-    if (!name) {
+    if (!name)
       return NextResponse.json({ error: "Name is required." }, { status: 400 });
-    }
 
-    const rows = (await getValues("Players!A:G")) as string[][];
-    if (rows.length < 2) {
+    // Players: A:PlayerID  B:Name  C:Role  D:Line  E:Status  F:MaxConsecutive  G:Priority  H:Notes
+    const rows = (await getValues("Players!A:H")) as string[][];
+    if (rows.length < 2)
       return NextResponse.json({ error: "Players sheet is empty." }, { status: 400 });
-    }
 
-    const headers = rows[0];
-    const nameIndex = headers.indexOf("Name");
-    const notesIndex = headers.indexOf("Notes");
+    const headers   = rows[0];
+    const nameIdx   = headers.indexOf("Name");
+    const notesIdx  = headers.indexOf("Notes"); // column H (index 7)
 
-    if (nameIndex === -1) {
+    if (nameIdx === -1)
       return NextResponse.json({ error: "Name column not found." }, { status: 400 });
-    }
 
-    // Find player row
     const rowOffset = rows.slice(1).findIndex(
-      (row) => (row[nameIndex] || "").trim().toLowerCase() === name.trim().toLowerCase()
+      (row) => (row[nameIdx] || "").trim().toLowerCase() === name.trim().toLowerCase()
     );
 
-    if (rowOffset === -1) {
+    if (rowOffset === -1)
       return NextResponse.json({ error: "Player not found." }, { status: 404 });
-    }
 
-    const sheetRow = rowOffset + 2; // 1-based + header row
-
-    // If Notes column doesn't exist, use column H (index 7)
-    const targetNotesIndex = notesIndex !== -1 ? notesIndex : 7;
-    const colLetter = String.fromCharCode(65 + targetNotesIndex); // A=65
+    const sheetRow        = rowOffset + 2;
+    const targetIdx       = notesIdx !== -1 ? notesIdx : 7; // default to H
+    const colLetter       = String.fromCharCode(65 + targetIdx);
 
     await updateValues(`Players!${colLetter}${sheetRow}`, [[notes ?? ""]]);
 
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error("UPDATE PLAYER ERROR:", err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Unknown error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Unknown error" }, { status: 500 });
   }
 }
