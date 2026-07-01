@@ -9,13 +9,19 @@ export async function GET() {
       getPoints(),
     ]);
 
-    const availablePlayers = players.filter(
-      (p) => (p.Status || "").trim().toLowerCase() === "available"
-    );
+    const availablePlayers = players
+      .filter((p) => (p.Status || "").trim().toLowerCase() === "available")
+      .map((p) => ({
+        Name: (p.Name || "").trim(),
+        PreferredLine: (p.PreferredLine || p.Line || "").trim().toUpperCase(),
+        Role: (p.Role || "").trim().toLowerCase(),
+        Notes: (p.Notes || "").trim(),
+      }))
+      .sort((a, b) => a.Name.localeCompare(b.Name));
 
     const latestPoints = [...points]
       .sort((a, b) => Number(b.PointNumber || 0) - Number(a.PointNumber || 0))
-      .slice(0, 10);
+      .slice(0, 15);
 
     return NextResponse.json({
       config,

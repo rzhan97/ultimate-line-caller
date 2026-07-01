@@ -1,24 +1,68 @@
 import { NextResponse } from "next/server";
-import { getPlayers, getPoints } from "@/lib/sheets";
+import { getPlayers, getPoints, getConfigMap } from "@/lib/sheets";
 
 export async function GET() {
   try {
-    const [players, points] = await Promise.all([
+    const [players, points, config] = await Promise.all([
       getPlayers(),
       getPoints(),
+      getConfigMap(),
     ]);
 
-    const stats: Record<
-      string,
-      {
-        name: string;
-        totalPoints: number;
-        totalSeconds: number;
-        totalMinutes: number;
-        oPoints: number;
-        dPoints: number;
-      }
-    > = {};
+    // day2_date in config as YYYY-MM-DD, defaults to today if not set
+    const day2DateStr = (config.day2_date || "").trim();
+
+    function getDay(isoString: string): 1 | 2 {
+      if (!day2DateStr || !isoString) return 1;
+      const pointDate = isoString.slice(0, 10); // YYYY-MM-DD
+      return pointDate >= day2DateStr ? 2 : 1;
+    }
+
+    type DayStat = {
+      totalPoints: number;
+      totalSeconds: number;
+      oPoints: number;
+      dPoints: number;
+      holds: number;
+      breaks: number;
+      conceded: number;
+    };
+
+    type PlayerStatEntry = {
+      name: string;
+      role: string;
+      notes: string;
+      totalPoints: number;
+      totalSeconds: number;
+      oPoints: number;
+      dPoints: number;
+      holds: number;
+      breaks: number;
+      conceded: number;
+      day1: DayStat;
+      day2: DayStat;
+      recentPoints: Array<{
+        pointNumber: string;
+        lineType: string;
+        possessionType: string;
+        result: string;
+        durationSec: number;
+        startTime: string;
+        day: number;
+      }>;
+    };
+
+    const stats: Record<string, PlayerStatEntry> = {};
+
+    const emptyDay = (): DayStat => ({
+      totalPoints: 0,
+      totalSeconds: 0,
+      oPoints: 0,
+      dPoints: 0,
+      holds: 0,
+      breaks: 0,
+      conceded: 0,
+    });
 
     // initialize from Players sheet
     for (const player of players) {
@@ -27,11 +71,18 @@ export async function GET() {
 
       stats[name] = {
         name,
+        role: (player.Role || "").trim().toLowerCase(),
+        notes: (player.Notes || "").trim(),
         totalPoints: 0,
         totalSeconds: 0,
-        totalMinutes: 0,
         oPoints: 0,
         dPoints: 0,
+        holds: 0,
+        breaks: 0,
+        conceded: 0,
+        day1: emptyDay(),
+        day2: emptyDay(),
+        recentPoints: [],
       };
     }
 
@@ -42,6 +93,10 @@ export async function GET() {
 
       const durationSec = Number(point.DurationSec || 0);
       const lineType = String(point.LineType || "").trim().toUpperCase();
+      const result = String(point.Result || "").trim().toLowerCase();
+      const startTime = String(point.StartTime || "");
+      const day = getDay(startTime);
+
       const names = String(point.PlayersCSV || "")
         .split(",")
         .map((s) => s.trim())
@@ -51,19 +106,52 @@ export async function GET() {
         if (!stats[name]) {
           stats[name] = {
             name,
+            role: "",
+            notes: "",
             totalPoints: 0,
             totalSeconds: 0,
-            totalMinutes: 0,
             oPoints: 0,
             dPoints: 0,
+            holds: 0,
+            breaks: 0,
+            conceded: 0,
+            day1: emptyDay(),
+            day2: emptyDay(),
+            recentPoints: [],
           };
         }
 
-        stats[name].totalPoints += 1;
-        stats[name].totalSeconds += durationSec;
+        const s = stats[name];
+        s.totalPoints += 1;
+        s.totalSeconds += durationSec;
 
-        if (lineType === "O") stats[name].oPoints += 1;
-        if (lineType === "D") stats[name].dPoints += 1;
+        if (lineType === "O") s.oPoints += 1;
+        if (lineType === "D") s.dPoints += 1;
+        if (result === "hold") s.holds += 1;
+        if (result === "break") s.breaks += 1;
+        if (result === "conceded") s.conceded += 1;
+
+        const dayKey = day === 2 ? "day2" : "day1";
+        s[dayKey].totalPoints += 1;
+        s[dayKey].totalSeconds += durationSec;
+        if (lineType === "O") s[dayKey].oPoints += 1;
+        if (lineType === "D") s[dayKey].dPoints += 1;
+        if (result === "hold") s[dayKey].holds += 1;
+        if (result === "break") s[dayKey].breaks += 1;
+        if (result === "conceded") s[dayKey].conceded += 1;
+
+        // keep last 10 points per player
+        if (s.recentPoints.length < 10) {
+          s.recentPoints.push({
+            pointNumber: String(point.PointNumber || ""),
+            lineType,
+            possessionType: String(point.PossessionType || ""),
+            result: String(point.Result || ""),
+            durationSec,
+            startTime,
+            day,
+          });
+        }
       }
     }
 
@@ -71,11 +159,11 @@ export async function GET() {
       .map((p) => ({
         ...p,
         totalMinutes: Number((p.totalSeconds / 60).toFixed(1)),
+        day1: { ...p.day1, totalMinutes: Number((p.day1.totalSeconds / 60).toFixed(1)) },
+        day2: { ...p.day2, totalMinutes: Number((p.day2.totalSeconds / 60).toFixed(1)) },
       }))
       .sort((a, b) => {
-        if (b.totalPoints !== a.totalPoints) {
-          return b.totalPoints - a.totalPoints;
-        }
+        if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
         return a.name.localeCompare(b.name);
       });
 
@@ -83,9 +171,7 @@ export async function GET() {
   } catch (err) {
     console.error("PLAYER STATS ERROR:", err);
     return NextResponse.json(
-      {
-        error: err instanceof Error ? err.message : "Unknown error",
-      },
+      { error: err instanceof Error ? err.message : "Unknown error" },
       { status: 500 }
     );
   }
