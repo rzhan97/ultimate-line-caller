@@ -902,7 +902,7 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
           return (
             <>
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
-                <button onClick={() => { setSelectedGameId("all"); setStatsCache({}); setSelectedTournament("all"); }} style={{
+                <button onClick={() => { setSelectedGameId("all"); setSelectedTournament("all"); }} style={{
                   padding: "5px 11px", borderRadius: 7, border: "1.5px solid",
                   borderColor: selectedTournament === "all" ? "#111827" : "#e5e7eb",
                   background: selectedTournament === "all" ? "#111827" : "#f9fafb",
@@ -910,7 +910,7 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
                   fontWeight: 700, fontSize: 11, cursor: "pointer",
                 }}>All</button>
                 {tournaments.map((t) => (
-                  <button key={t} onClick={() => { setSelectedTournament(t); setSelectedGameId("all"); setStatsCache({}); }} style={{
+                  <button key={t} onClick={() => { setSelectedTournament(t); setSelectedGameId("all"); }} style={{
                     padding: "5px 11px", borderRadius: 7, border: "1.5px solid",
                     borderColor: selectedTournament === t ? "#7c3aed" : "#e5e7eb",
                     background: selectedTournament === t ? "#ede9fe" : "#f9fafb",
@@ -923,7 +923,7 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
               {/* Game pills within selected tournament */}
               {selectedTournament !== "all" && (
                 <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
-                  <button onClick={() => { setSelectedGameId("all"); setStatsCache({}); }} style={{
+                  <button onClick={() => { setSelectedGameId("all"); }} style={{
                     padding: "4px 10px", borderRadius: 6, border: "1.5px solid",
                     borderColor: selectedGameId === "all" ? "#2563eb" : "#e5e7eb",
                     background: selectedGameId === "all" ? "#2563eb" : "#f9fafb",
@@ -934,7 +934,7 @@ function StatsTab({ allGames, allPoints, defaultGameId, onOpenPlayer }: {
                     const active = selectedGameId === g.GameID;
                     const done = (g.Status || "").toLowerCase() === "completed";
                     return (
-                      <button key={g.GameID} onClick={() => { setSelectedGameId(g.GameID); setStatsCache({}); }} style={{
+                      <button key={g.GameID} onClick={() => { setSelectedGameId(g.GameID); }} style={{
                         padding: "4px 10px", borderRadius: 6, border: "1.5px solid",
                         borderColor: active ? "#2563eb" : "#e5e7eb",
                         background: active ? "#2563eb" : "#f9fafb",
